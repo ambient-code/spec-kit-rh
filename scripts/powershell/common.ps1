@@ -79,17 +79,60 @@ function Test-FeatureBranch {
         return $true
     }
     
-    if ($Branch -notmatch '^[0-9]{3}-') {
-        Write-Output "ERROR: Not on a feature branch. Current branch: $Branch"
-        Write-Output "Feature branches should be named like: 001-feature-name"
+    # Allow any branch name except protected branches
+    if ($Branch -eq "main" -or $Branch -eq "master" -or $Branch -eq "develop") {
+        Write-Output "ERROR: Cannot run spec-kit on protected branch: $Branch"
+        Write-Output "Create a feature branch first: git checkout -b my-feature-name"
         return $false
     }
+    
     return $true
 }
 
 function Get-FeatureDir {
     param([string]$RepoRoot, [string]$Branch)
     Join-Path $RepoRoot "specs/$Branch"
+}
+
+function Find-FeatureDirByPrefix {
+    param(
+        [string]$RepoRoot,
+        [string]$BranchName
+    )
+    
+    $specsDir = Join-Path $RepoRoot "specs"
+    
+    # First: Try exact match (most common case, fastest)
+    $exactMatch = Join-Path $specsDir $BranchName
+    if (Test-Path -Path $exactMatch -PathType Container) {
+        return $exactMatch
+    }
+    
+    # Second: If branch has numeric prefix (legacy support), try prefix matching
+    if ($BranchName -match '^(\d{3})-') {
+        $prefix = $matches[1]
+        
+        # Search for directories that start with this prefix
+        $matches = @()
+        if (Test-Path $specsDir) {
+            Get-ChildItem -Path $specsDir -Directory | Where-Object { 
+                $_.Name -match "^$prefix-" 
+            } | ForEach-Object {
+                $matches += $_.Name
+            }
+        }
+        
+        # If exactly one match, use it
+        if ($matches.Count -eq 1) {
+            return Join-Path $specsDir $matches[0]
+        } elseif ($matches.Count -gt 1) {
+            Write-Error "ERROR: Multiple spec directories found with prefix '$prefix': $($matches -join ', ')"
+            Write-Error "Please ensure only one spec directory exists per numeric prefix."
+        }
+    }
+    
+    # Third: Return expected path (will be created or error reported later)
+    return Join-Path $specsDir $BranchName
 }
 
 function Get-FeaturePathsEnv {

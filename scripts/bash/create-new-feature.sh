@@ -25,12 +25,18 @@ while [ $i -lt $# ]; do
             echo ""
             echo "Options:"
             echo "  --json              Output in JSON format"
-            echo "  --short-name <name> Provide a custom short name (2-4 words) for the branch"
+            echo "  --short-name <name> Provide a custom branch name (descriptive, kebab-case)"
             echo "  --help, -h          Show this help message"
+            echo ""
+            echo "Branch naming:"
+            echo "  - Any descriptive name works: user-auth, payment-fix, oauth-integration"
+            echo "  - Numbers are optional: 001-user-auth or just user-auth"
+            echo "  - Branch name becomes the specs/ folder name"
             echo ""
             echo "Examples:"
             echo "  $0 'Add user authentication system' --short-name 'user-auth'"
             echo "  $0 'Implement OAuth2 integration for API'"
+            echo "  $0 --short-name '001-payment-fix' 'Fix payment processing bug'"
             exit 0
             ;;
         *) 
@@ -81,19 +87,9 @@ cd "$REPO_ROOT"
 SPECS_DIR="$REPO_ROOT/specs"
 mkdir -p "$SPECS_DIR"
 
-HIGHEST=0
-if [ -d "$SPECS_DIR" ]; then
-    for dir in "$SPECS_DIR"/*; do
-        [ -d "$dir" ] || continue
-        dirname=$(basename "$dir")
-        number=$(echo "$dirname" | grep -o '^[0-9]\+' || echo "0")
-        number=$((10#$number))
-        if [ "$number" -gt "$HIGHEST" ]; then HIGHEST=$number; fi
-    done
-fi
-
-NEXT=$((HIGHEST + 1))
-FEATURE_NUM=$(printf "%03d" "$NEXT")
+# Feature numbering is now optional
+# If user wants numbers, they can include them in the short-name (e.g., --short-name "001-user-auth")
+FEATURE_NUM=""
 
 # Function to generate branch name with stop word filtering and length filtering
 generate_branch_name() {
@@ -115,9 +111,12 @@ generate_branch_name() {
         if ! echo "$word" | grep -qiE "$stop_words"; then
             if [ ${#word} -ge 3 ]; then
                 meaningful_words+=("$word")
-            elif echo "$description" | grep -q "\b${word^^}\b"; then
+            else
                 # Keep short words if they appear as uppercase in original (likely acronyms)
-                meaningful_words+=("$word")
+                local word_upper=$(echo "$word" | tr '[:lower:]' '[:upper:]')
+                if echo "$description" | grep -q "\b${word_upper}\b"; then
+                    meaningful_words+=("$word")
+                fi
             fi
         fi
     done
@@ -145,56 +144,78 @@ generate_branch_name() {
 # Generate branch name
 if [ -n "$SHORT_NAME" ]; then
     # Use provided short name, just clean it up
-    BRANCH_SUFFIX=$(echo "$SHORT_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\+/-/g' | sed 's/^-//' | sed 's/-$//')
+    BRANCH_NAME=$(echo "$SHORT_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\+/-/g' | sed 's/^-//' | sed 's/-$//')
 else
     # Generate from description with smart filtering
-    BRANCH_SUFFIX=$(generate_branch_name "$FEATURE_DESCRIPTION")
+    BRANCH_NAME=$(generate_branch_name "$FEATURE_DESCRIPTION")
 fi
-
-BRANCH_NAME="${FEATURE_NUM}-${BRANCH_SUFFIX}"
 
 # GitHub enforces a 244-byte limit on branch names
 # Validate and truncate if necessary
 MAX_BRANCH_LENGTH=244
 if [ ${#BRANCH_NAME} -gt $MAX_BRANCH_LENGTH ]; then
-    # Calculate how much we need to trim from suffix
-    # Account for: feature number (3) + hyphen (1) = 4 chars
-    MAX_SUFFIX_LENGTH=$((MAX_BRANCH_LENGTH - 4))
-    
-    # Truncate suffix at word boundary if possible
-    TRUNCATED_SUFFIX=$(echo "$BRANCH_SUFFIX" | cut -c1-$MAX_SUFFIX_LENGTH)
+    # Truncate at word boundary if possible
+    TRUNCATED_NAME=$(echo "$BRANCH_NAME" | cut -c1-$MAX_BRANCH_LENGTH)
     # Remove trailing hyphen if truncation created one
-    TRUNCATED_SUFFIX=$(echo "$TRUNCATED_SUFFIX" | sed 's/-$//')
+    TRUNCATED_NAME=$(echo "$TRUNCATED_NAME" | sed 's/-$//')
     
     ORIGINAL_BRANCH_NAME="$BRANCH_NAME"
-    BRANCH_NAME="${FEATURE_NUM}-${TRUNCATED_SUFFIX}"
+    BRANCH_NAME="$TRUNCATED_NAME"
     
     >&2 echo "[specify] Warning: Branch name exceeded GitHub's 244-byte limit"
     >&2 echo "[specify] Original: $ORIGINAL_BRANCH_NAME (${#ORIGINAL_BRANCH_NAME} bytes)"
     >&2 echo "[specify] Truncated to: $BRANCH_NAME (${#BRANCH_NAME} bytes)"
 fi
 
+# Check if we're already on a feature branch with existing folder
+CURRENT_BRANCH=""
 if [ "$HAS_GIT" = true ]; then
-    git checkout -b "$BRANCH_NAME"
-else
-    >&2 echo "[specify] Warning: Git repository not detected; skipped branch creation for $BRANCH_NAME"
+    CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
 fi
 
-FEATURE_DIR="$SPECS_DIR/$BRANCH_NAME"
-mkdir -p "$FEATURE_DIR"
+# Check if a folder already exists for the current branch
+if [ -n "$CURRENT_BRANCH" ] && [ -d "$SPECS_DIR/$CURRENT_BRANCH" ]; then
+    # Use existing branch and folder
+    BRANCH_NAME="$CURRENT_BRANCH"
+    FEATURE_DIR="$SPECS_DIR/$CURRENT_BRANCH"
+    >&2 echo "[specify] Using existing branch: $CURRENT_BRANCH"
+    >&2 echo "[specify] Using existing feature directory: $FEATURE_DIR"
+elif [ -n "$CURRENT_BRANCH" ] && [ "$CURRENT_BRANCH" != "main" ] && [ "$CURRENT_BRANCH" != "master" ] && [ "$CURRENT_BRANCH" != "develop" ]; then
+    # Already on a feature branch, just create the folder
+    BRANCH_NAME="$CURRENT_BRANCH"
+    FEATURE_DIR="$SPECS_DIR/$CURRENT_BRANCH"
+    mkdir -p "$FEATURE_DIR"
+    >&2 echo "[specify] Using existing branch: $CURRENT_BRANCH"
+    >&2 echo "[specify] Created feature directory: $FEATURE_DIR"
+else
+    # Create new branch and folder
+    if [ "$HAS_GIT" = true ]; then
+        git checkout -b "$BRANCH_NAME"
+        >&2 echo "[specify] Created new branch: $BRANCH_NAME"
+    else
+        >&2 echo "[specify] Warning: Git repository not detected; skipped branch creation for $BRANCH_NAME"
+    fi
+    FEATURE_DIR="$SPECS_DIR/$BRANCH_NAME"
+    mkdir -p "$FEATURE_DIR"
+    >&2 echo "[specify] Created feature directory: $FEATURE_DIR"
+fi
 
 TEMPLATE="$REPO_ROOT/.specify/templates/spec-template.md"
 SPEC_FILE="$FEATURE_DIR/spec.md"
-if [ -f "$TEMPLATE" ]; then cp "$TEMPLATE" "$SPEC_FILE"; else touch "$SPEC_FILE"; fi
+if [ ! -f "$SPEC_FILE" ]; then
+    if [ -f "$TEMPLATE" ]; then cp "$TEMPLATE" "$SPEC_FILE"; else touch "$SPEC_FILE"; fi
+    >&2 echo "[specify] Created spec file: $SPEC_FILE"
+else
+    >&2 echo "[specify] Using existing spec file: $SPEC_FILE"
+fi
 
 # Set the SPECIFY_FEATURE environment variable for the current session
 export SPECIFY_FEATURE="$BRANCH_NAME"
 
 if $JSON_MODE; then
-    printf '{"BRANCH_NAME":"%s","SPEC_FILE":"%s","FEATURE_NUM":"%s"}\n' "$BRANCH_NAME" "$SPEC_FILE" "$FEATURE_NUM"
+    printf '{"BRANCH_NAME":"%s","SPEC_FILE":"%s"}\n' "$BRANCH_NAME" "$SPEC_FILE"
 else
     echo "BRANCH_NAME: $BRANCH_NAME"
     echo "SPEC_FILE: $SPEC_FILE"
-    echo "FEATURE_NUM: $FEATURE_NUM"
     echo "SPECIFY_FEATURE environment variable set to: $BRANCH_NAME"
 fi
